@@ -1,135 +1,200 @@
 import asyncio
-import sqlite3
+import json
+import os
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+# --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = "8539264650:AAGzgTQNH0DeqxsRMruQEBEXVXtj5x-mJqQ"
+DB_FILE = "data/school_db.json"
+FAVS_FILE = "data/favorites.json"
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ФУНКЦИИ ДАННЫХ ---
 
-def get_db():
-    return sqlite3.connect('school.db')
+def load_db():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except: return {"schedule": {}}
+    return {"schedule": {}}
+
+def load_favs():
+    if os.path.exists(FAVS_FILE):
+        try:
+            with open(FAVS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except: return {}
+    return {}
+
+def save_favs(data):
+    os.makedirs("data", exist_ok=True)
+    with open(FAVS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
 def get_schedule_text(name, mode="class"):
-    conn = get_db()
-    cur = conn.cursor()
-    query = "SELECT day, lesson_num, subject, room FROM schedule WHERE class_name=? ORDER BY day, lesson_num" if mode == "class" else "SELECT day, lesson_num, subject, room FROM schedule WHERE teacher_name=? ORDER BY day, lesson_num"
-    cur.execute(query, (name,))
-    data = cur.fetchall()
+    db = load_db()
+    sc = db.get("schedule", {})
+    data = {}
+    if mode == "class":
+        data = sc.get(name, {})
+    else:
+        for c_name, days in sc.items():
+            for day, lessons in days.items():
+                if day not in data: data[day] = {}
+                for num, info in lessons.items():
+                    if info.get('t') == name:
+                        data[day][num] = {"s": info['s'], "r": f"{info['r']} ({c_name})"}
     
-    if not data:
-        return f"Расписание для {name} пока не заполнено."
-    
-    text = f"📅 Расписание: {name}\n"
-    current_day = ""
-    for row in data:
-        if row[0] != current_day:
-            text += f"\n📌 <b>{row[0]}</b>:\n"
-            current_day = row[0]
-        text += f"{row[1]}. {row[2]} ({row[3]})\n"
+    if not data: return f"❌ Расписание для <b>{name}</b> не найдено."
+
+    text = f"📅 <b>Расписание: {name}</b>\n"
+    for day in ["Пн", "Вт", "Ср", "Чт", "Пт"]:
+        if day in data and data[day]:
+            text += f"\n📌 <b>{day}:</b>\n"
+            for num in sorted(data[day].keys(), key=int):
+                item = data[day][num]
+                text += f"{num}. {item['s']} — {item['r']}\n"
     return text
 
 # --- ОБРАБОТЧИКИ ---
 
 @dp.message(Command("start"))
-async def start(message: types.Message):
+async def cmd_start(message: types.Message):
     kb = InlineKeyboardBuilder()
-    kb.row(types.InlineKeyboardButton(text="📅 Расписание", callback_data="main_sched"))
-    kb.row(types.InlineKeyboardButton(text="⭐ Избранное", callback_data="main_favs"))
-    await message.answer("Выберите действие:", reply_markup=kb.as_markup())
+    kb.row(types.InlineKeyboardButton(text="👥 Классы", callback_data="list_classes"))
+    kb.row(types.InlineKeyboardButton(text="👨‍🏫 Учителя", callback_data="list_teachers"))
+    kb.row(types.InlineKeyboardButton(text="⭐ Моё избранное", callback_data="show_favs"))
+    await message.answer("Выберите раздел:", reply_markup=kb.as_markup())
 
-@dp.callback_query(F.data == "main_sched")
-async def select_type(callback: types.CallbackQuery):
-    kb = InlineKeyboardBuilder()
-    kb.add(types.InlineKeyboardButton(text="Для классов", callback_data="type_class"))
-    kb.add(types.InlineKeyboardButton(text="Для учителей", callback_data="type_teacher"))
-    await callback.message.edit_text("Чье расписание смотрим?", reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data == "type_class")
+@dp.callback_query(F.data == "list_classes")
 async def list_classes(callback: types.CallbackQuery):
+    db = load_db()
+    classes = sorted(list(db.get("schedule", {}).keys()))
+    if not classes:
+        await callback.answer("База пуста", show_alert=True)
+        return
     kb = InlineKeyboardBuilder()
-    # Генерируем сетку 5-11 классы
-    for grade in range(5, 12):
-        row = []
-        letters = ["А", "Б", "В"] if grade < 10 else ["А", "Б"]
-        for letter in letters:
-            name = f"{grade}{letter}"
-            row.append(types.InlineKeyboardButton(text=name, callback_data=f"show_class_{name}"))
-        kb.row(*row)
-    kb.row(types.InlineKeyboardButton(text="⬅ Назад", callback_data="main_sched"))
+    for c in classes:
+        kb.add(types.InlineKeyboardButton(text=c, callback_data=f"view_c_{c}"))
+    kb.adjust(3)
+    kb.row(types.InlineKeyboardButton(text="⬅ Назад", callback_data="to_start"))
     await callback.message.edit_text("Выберите класс:", reply_markup=kb.as_markup())
 
-@dp.callback_query(F.data.startswith("show_"))
-async def show_sched(callback: types.CallbackQuery):
-    _, mode, name = callback.data.split("_")
+@dp.callback_query(F.data == "list_teachers")
+async def list_teachers(callback: types.CallbackQuery):
+    db = load_db()
+    teachers = set()
+    for days in db.get("schedule", {}).values():
+        for lessons in days.values():
+            for info in lessons.values():
+                if info.get('t'): teachers.add(info['t'])
+    if not teachers:
+        await callback.answer("Учителя не найдены", show_alert=True)
+        return
+    kb = InlineKeyboardBuilder()
+    for t in sorted(list(teachers)):
+        kb.add(types.InlineKeyboardButton(text=t, callback_data=f"view_t_{t}"))
+    kb.adjust(2)
+    kb.row(types.InlineKeyboardButton(text="⬅ Назад", callback_data="to_start"))
+    await callback.message.edit_text("Выберите учителя:", reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data.startswith("view_"))
+async def view_item(callback: types.CallbackQuery):
+    parts = callback.data.split("_")
+    mode_char = parts[1]
+    name = "_".join(parts[2:])
+    user_id = str(callback.from_user.id)
+    
+    mode = "class" if mode_char == "c" else "teacher"
     text = get_schedule_text(name, mode)
     
-    kb = InlineKeyboardBuilder()
-    kb.row(types.InlineKeyboardButton(text="⭐ В избранное", callback_data=f"addfav_{name}"))
-    kb.row(types.InlineKeyboardButton(text="⬅ Назад", callback_data=f"type_{mode}"))
+    # Проверяем, есть ли уже в избранном
+    favs = load_favs().get(user_id, {"c": [], "t": []})
+    is_fav = name in (favs["c"] if mode_char == "c" else favs["t"])
     
+    kb = InlineKeyboardBuilder()
+    if is_fav:
+        kb.row(types.InlineKeyboardButton(text="❌ Удалить из избранного", callback_data=f"remfav_{mode_char}_{name}"))
+    else:
+        kb.row(types.InlineKeyboardButton(text="⭐ В избранное", callback_data=f"addfav_{mode_char}_{name}"))
+    
+    kb.row(types.InlineKeyboardButton(text="⬅ Назад", callback_data="to_start"))
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
 @dp.callback_query(F.data.startswith("addfav_"))
-async def add_favorite(callback: types.CallbackQuery):
-    name = callback.data.split("_")[1]
-    user_id = callback.from_user.id
+async def add_to_fav(callback: types.CallbackQuery):
+    parts = callback.data.split("_")
+    mode_char, name = parts[1], "_".join(parts[2:])
+    user_id = str(callback.from_user.id)
+    favs = load_favs()
+    if user_id not in favs: favs[user_id] = {"c": [], "t": []}
     
-    conn = get_db()
-    cur = conn.cursor()
-    # Проверяем, нет ли уже в избранном
-    cur.execute("SELECT * FROM favorites WHERE user_id=? AND class_name=?", (user_id, name))
-    if not cur.fetchone():
-        cur.execute("INSERT INTO favorites (user_id, class_name) VALUES (?, ?)", (user_id, name))
-        conn.commit()
-        await callback.answer(f"{name} добавлен в избранное!")
-    else:
-        await callback.answer("Уже в избранном")
-    conn.close()
+    target = favs[user_id]["c"] if mode_char == "c" else favs[user_id]["t"]
+    if name not in target:
+        target.append(name)
+        save_favs(favs)
+        await callback.answer(f"✅ {name} в избранном")
+        # Обновляем сообщение, чтобы кнопка сменилась на "Удалить"
+        await view_item(callback)
 
-@dp.callback_query(F.data == "main_favs")
-async def show_favorites(callback: types.CallbackQuery):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT class_name FROM favorites WHERE user_id=?", (callback.from_user.id,))
-    favs = cur.fetchall()
+@dp.callback_query(F.data.startswith("remfav_"))
+async def rem_from_fav(callback: types.CallbackQuery):
+    parts = callback.data.split("_")
+    mode_char, name = parts[1], "_".join(parts[2:])
+    user_id = str(callback.from_user.id)
+    favs = load_favs()
     
-    if not favs:
-        await callback.answer("У вас нет избранного", show_alert=True)
+    if user_id in favs:
+        target = favs[user_id]["c"] if mode_char == "c" else favs[user_id]["t"]
+        if name in target:
+            target.remove(name)
+            save_favs(favs)
+            await callback.answer(f"🗑 {name} удален")
+            # Обновляем сообщение, чтобы кнопка сменилась на "Добавить"
+            await view_item(callback)
+
+@dp.callback_query(F.data == "show_favs")
+async def show_favs(callback: types.CallbackQuery):
+    user_id = str(callback.from_user.id)
+    favs = load_favs().get(user_id, {"c": [], "t": []})
+    if not favs["c"] and not favs["t"]:
+        await callback.answer("Избранное пусто", show_alert=True)
         return
-
     kb = InlineKeyboardBuilder()
-    for f in favs:
-        kb.add(types.InlineKeyboardButton(text=f[0], callback_data=f"show_class_{f[0]}"))
-    kb.row(types.InlineKeyboardButton(text="⬅ Назад", callback_data="start_back"))
-    
+    for c in favs["c"]: kb.row(types.InlineKeyboardButton(text=f"👥 {c}", callback_data=f"view_c_{c}"))
+    for t in favs["t"]: kb.row(types.InlineKeyboardButton(text=f"👨‍🏫 {t}", callback_data=f"view_t_{t}"))
+    kb.row(types.InlineKeyboardButton(text="⬅ Назад", callback_data="to_start"))
     await callback.message.edit_text("Ваше избранное:", reply_markup=kb.as_markup())
 
-@dp.callback_query(F.data == "start_back")
-async def back_to_start(callback: types.CallbackQuery):
-    await start(callback.message)
+@dp.callback_query(F.data == "to_start")
+async def to_start(callback: types.CallbackQuery):
+    await cmd_start(callback.message)
+    await callback.answer()
 
-# --- ЛОГИКА УВЕДОМЛЕНИЙ ---
-async def notify_updates(target_name):
-    """
-    Эту функцию нужно вызвать, когда админка меняет расписание для target_name.
-    """
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM favorites WHERE class_name=?", (target_name,))
-    users = cur.fetchall()
-    
-    for user in users:
+async def check_updates_task():
+    last_mtime = os.path.getmtime(DB_FILE) if os.path.exists(DB_FILE) else 0
+    while True:
+        await asyncio.sleep(15)
+        if os.path.exists(DB_FILE):
+            curr = os.path.getmtime(DB_FILE)
+            if curr > last_mtime:
+                last_mtime = curr
+                await send_notifications()
+
+async def send_notifications():
+    favs = load_favs()
+    for uid in favs:
         try:
-            await bot.send_message(user[0], f"🔔 Внимание! Расписание для {target_name} изменилось.")
-        except:
-            pass # Пользователь мог заблокировать бота
-    conn.close()
+            await bot.send_message(uid, "🔔 Расписание обновлено!")
+        except: pass
 
 async def main():
+    asyncio.create_task(check_updates_task())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

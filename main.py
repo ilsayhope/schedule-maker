@@ -1,9 +1,37 @@
+import json
+import os
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from jinja2 import Template
-import sqlite3
+from dotenv import load_dotenv
 
+load_dotenv()
 app = FastAPI()
+
+# Путь к JSON-базе
+DB_FILE = os.getenv("DB_PATH")
+
+def load_db():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Ошибка чтения базы: {e}")
+            return {"schedule": {}}
+    return {"schedule": {}}
+
+# Словарь для перевода коротких имен дней из JSON в полные для твоего шаблона
+DAY_MAP = {
+    "Пн": "Понедельник",
+    "Вт": "Вторник",
+    "Ср": "Среда",
+    "Чт": "Четверг",
+    "Пт": "Пятница"
+}
+
+# --- ТВОЙ UI/UX (БЕЗ ИЗМЕНЕНИЙ) ---
 
 BASE_STYLE = """
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -48,7 +76,6 @@ BASE_STYLE = """
         align-items: center;
     }
 
-    /* Подложка для навигации */
     .nav-header {
         position: sticky;
         top: 20px;
@@ -75,7 +102,6 @@ BASE_STYLE = """
         letter-spacing: 0.5px;
     }
 
-    /* Огромные баблы на главной */
     .btn-giant { 
         padding: 45px 60px; 
         background: var(--card); 
@@ -100,10 +126,9 @@ BASE_STYLE = """
         box-shadow: 0 20px 40px rgba(0,0,0,0.12);
     }
 
-    /* Ускоренная анимация */
     .fast-fade {
         animation: zoomIn;
-        animation-duration: 0.35s; /* Быстрое появление */
+        animation-duration: 0.35s;
     }
 
     .grid-selection { 
@@ -252,12 +277,7 @@ SCHEDULE_HTML = BASE_STYLE + """
 </div>
 """
 
-# Функции FastAPI те же самые
-
-# --- РОУТЫ (Остаются прежними) ---
-
-def get_db():
-    return sqlite3.connect('school.db')
+# --- БЭКЕНД РОУТЫ (ОБНОВЛЕНЫ ДЛЯ JSON) ---
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -265,27 +285,59 @@ async def index():
 
 @app.get("/select/{mode}", response_class=HTMLResponse)
 async def select(mode: str):
-    conn = get_db()
-    cur = conn.cursor()
+    db = load_db()
+    items = []
+    
     if mode == "class":
-        cur.execute("SELECT DISTINCT class_name FROM schedule ORDER BY length(class_name), class_name")
+        # Получаем уникальные классы и сортируем
+        items = sorted(list(db.get("schedule", {}).keys()))
         type_name, type_id = "класс", "class"
     else:
-        cur.execute("SELECT DISTINCT teacher_name FROM schedule ORDER BY teacher_name")
+        # Собираем уникальных учителей из всех уроков
+        teachers = set()
+        for class_name in db.get("schedule", {}):
+            for day in db["schedule"][class_name]:
+                for lesson in db["schedule"][class_name][day].values():
+                    if lesson.get('t'): teachers.add(lesson['t'])
+        items = sorted(list(teachers))
         type_name, type_id = "учителя", "teacher"
     
-    items = [row[0] for row in cur.fetchall()]
     return Template(SELECT_HTML).render(items=items, type_name=type_name, type_id=type_id)
 
 @app.get("/view/{mode}/{name}", response_class=HTMLResponse)
 async def view_schedule(mode: str, name: str):
-    conn = get_db()
-    cur = conn.cursor()
-    query = "SELECT * FROM schedule WHERE class_name=? ORDER BY lesson_num" if mode == "class" else "SELECT * FROM schedule WHERE teacher_name=? ORDER BY lesson_num"
-    cur.execute(query, (name,))
-    lessons = cur.fetchall()
-    return Template(SCHEDULE_HTML).render(target=name, lessons=lessons, type_id=mode)
+    db = load_db()
+    raw_db = db.get("schedule", {})
+    
+    # Мы должны собрать список уроков в формате кортежей, который ожидает твой HTML
+    # Формат кортежа l: (0:id, 1:день_полный, 2:номер, 3:класс, 4:учитель, 5:предмет, 6:кабинет)
+    lessons_for_template = []
+    
+    if mode == "class":
+        class_data = raw_db.get(name, {})
+        for day_short, lessons in class_data.items():
+            full_day = DAY_MAP.get(day_short, day_short)
+            for num, info in lessons.items():
+                lessons_for_template.append((
+                    0, full_day, num, name, info.get('t'), info.get('s'), info.get('r')
+                ))
+    else:
+        # Режим учителя: ищем уроки по всем классам
+        for class_name, days in raw_db.items():
+            for day_short, lessons in days.items():
+                full_day = DAY_MAP.get(day_short, day_short)
+                for num, info in lessons.items():
+                    if info.get('t') == name:
+                        # Для учителя в поле "кабинет" добавим класс для наглядности
+                        room_info = f"{info.get('r')} ({class_name})"
+                        lessons_for_template.append((
+                            0, full_day, num, class_name, name, info.get('s'), room_info
+                        ))
+
+    # Сортируем по номеру урока, чтобы они шли по порядку 1, 2, 3...
+    lessons_for_template.sort(key=lambda x: int(x[2]))
+
+    return Template(SCHEDULE_HTML).render(target=name, lessons=lessons_for_template, type_id=mode)
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -4,11 +4,14 @@ import os
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = "8539264650:AAGzgTQNH0DeqxsRMruQEBEXVXtj5x-mJqQ"
-DB_FILE = "data/school_db.json"
-FAVS_FILE = "data/favorites.json"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DB_FILE = os.getenv("DB_PATH")
+FAVS_FILE = os.getenv("FAVS_PATH")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()

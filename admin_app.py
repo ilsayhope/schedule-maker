@@ -8,9 +8,11 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt6.QtCore import Qt, QPropertyAnimation, QRect
 import requests
 import sqlite3
+from dotenv import load_dotenv
+load_dotenv()
 
 # --- БАЗА ДАННЫХ (JSON Storage) ---
-DB_FILE = "school"
+DB_FILE = os.getenv("DB_PATH")
 
 def load_db():
     if os.path.exists(DB_FILE):

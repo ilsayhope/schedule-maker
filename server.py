@@ -17,4 +17,4 @@ def upload_file():
 
 if __name__ == '__main__':
     # На реальном сервере укажи host='0.0.0.0'
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host=os.getenv("SITE_HOST"), port=os.getenv("SITE_PORT"))
